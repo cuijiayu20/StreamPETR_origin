@@ -6,7 +6,7 @@
 # Usage:
 #   python robust_test/robust_test.py \
 #       projects/configs/StreamPETR/stream_petr_r50_flash_704_bs2_seq_428q_nui_60e.py \
-#       data/ckpts/19_9_2.pth \
+#       data/ckpts/stream_petr_r50_flash_704_bs2_seq_428q_nui_60e.pth \
 #       --noise-type frame_drop \
 #       --noise-pkl data/nuscenes/nuscenes_infos_val_with_noise.pkl \
 #       --drop-ratio 30 --drop-mode discrete
