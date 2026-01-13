@@ -27,12 +27,11 @@ project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, project_root)
 
 import mmcv
+import torch
 from mmcv import Config
 from mmcv.runner import load_checkpoint
 from mmdet3d.datasets import build_dataset
 from mmdet3d.models import build_model
-from mmdet.apis import single_gpu_test
-from mmdet.datasets import build_dataloader
 
 # Import robust modules to register them
 from robust_test.datasets import RobustNuScenesDataset
@@ -161,6 +160,9 @@ def modify_pipeline_for_camera_drop(pipeline, args):
 def run_single_test(cfg, checkpoint, args):
     """Run a single robustness test."""
     import torch
+    from mmcv.parallel import MMDataParallel
+    from mmcv.runner import wrap_fp16_model
+    from projects.mmdet3d_plugin.datasets.builder import build_dataloader
     
     # Set device
     torch.cuda.set_device(args.gpu_id)
@@ -168,32 +170,83 @@ def run_single_test(cfg, checkpoint, args):
     # Modify config for noise
     cfg = modify_config_for_noise(cfg, args)
     
+    # Set test mode
+    cfg.data.test.test_mode = True
+    
     # Build dataset
     dataset = build_dataset(cfg.data.test)
     
-    # Build dataloader
+    # Build dataloader (use custom builder from StreamPETR)
     data_loader = build_dataloader(
         dataset,
         samples_per_gpu=1,
         workers_per_gpu=cfg.data.workers_per_gpu,
         dist=False,
         shuffle=False,
+        nonshuffler_sampler=cfg.data.get('nonshuffler_sampler', dict(type='DistributedSampler')),
     )
     
     # Build model
+    cfg.model.pretrained = None
     cfg.model.train_cfg = None
     model = build_model(cfg.model, test_cfg=cfg.get('test_cfg'))
-    load_checkpoint(model, checkpoint, map_location='cpu')
-    model.cuda()
+    
+    # Handle FP16
+    fp16_cfg = cfg.get('fp16', None)
+    if fp16_cfg is not None:
+        wrap_fp16_model(model)
+    
+    checkpoint_data = load_checkpoint(model, checkpoint, map_location='cpu')
+    
+    # Set CLASSES
+    if 'CLASSES' in checkpoint_data.get('meta', {}):
+        model.CLASSES = checkpoint_data['meta']['CLASSES']
+    else:
+        model.CLASSES = dataset.CLASSES
+    
+    # Wrap with MMDataParallel
+    model = MMDataParallel(model, device_ids=[args.gpu_id])
     model.eval()
     
-    # Run test
-    outputs = single_gpu_test(model, data_loader)
+    # Run test (custom single GPU test)
+    outputs = custom_single_gpu_test(model, data_loader)
     
     # Evaluate
     eval_results = dataset.evaluate(outputs, metric=args.eval)
     
     return eval_results
+
+
+def custom_single_gpu_test(model, data_loader):
+    """Custom single GPU test for StreamPETR."""
+    import mmcv
+    
+    model.eval()
+    bbox_results = []
+    dataset = data_loader.dataset
+    prog_bar = mmcv.ProgressBar(len(dataset))
+    
+    for i, data in enumerate(data_loader):
+        with torch.no_grad():
+            result = model(return_loss=False, rescale=True, **data)
+            
+            # Handle result format
+            if isinstance(result, dict):
+                if 'bbox_results' in result.keys():
+                    bbox_result = result['bbox_results']
+                    batch_size = len(result['bbox_results'])
+                    bbox_results.extend(bbox_result)
+                else:
+                    batch_size = 1
+                    bbox_results.append(result)
+            else:
+                batch_size = len(result)
+                bbox_results.extend(result)
+        
+        for _ in range(batch_size):
+            prog_bar.update()
+    
+    return bbox_results
 
 
 def run_batch_test(cfg, checkpoint, args):
