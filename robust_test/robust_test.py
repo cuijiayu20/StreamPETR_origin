@@ -10,6 +10,9 @@
 #       --noise-type frame_drop \
 #       --noise-pkl data/nuscenes/nuscenes_infos_val_with_noise.pkl \
 #       --drop-ratio 30 --drop-mode discrete
+#
+#   Note: The config uses nuscenes2d_temporal_infos_val.pkl as ann_file,
+#         and noise_pkl provides additional noise annotations.
 # ------------------------------------------------------------------------
 
 import argparse
