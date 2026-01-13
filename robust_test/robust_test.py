@@ -1,0 +1,298 @@
+#!/usr/bin/env python
+# ------------------------------------------------------------------------
+# Robust Test Script for StreamPETR
+# Run robustness benchmarks without modifying original code
+# ------------------------------------------------------------------------
+# Usage:
+#   python robust_test/robust_test.py \
+#       projects/configs/StreamPETR/stream_petr_r50_flash_704_bs2_seq_428q_nui_60e.py \
+#       data/ckpts/19_9_2.pth \
+#       --noise-type frame_drop \
+#       --noise-pkl data/nuscenes/nuscenes_infos_val_with_noise.pkl \
+#       --drop-ratio 30 --drop-mode discrete
+# ------------------------------------------------------------------------
+
+import argparse
+import os
+import sys
+import copy
+import json
+from datetime import datetime
+
+# Add project root to path
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, project_root)
+
+import mmcv
+from mmcv import Config
+from mmcv.runner import load_checkpoint
+from mmdet3d.datasets import build_dataset
+from mmdet3d.models import build_model
+from mmdet.apis import single_gpu_test
+from mmdet.datasets import build_dataloader
+
+# Import robust modules to register them
+from robust_test.datasets import RobustNuScenesDataset
+from robust_test.pipelines import LoadMultiViewImageWithMask, LoadMultiViewImageWithDrop
+
+
+NOISE_TYPES = ['clean', 'frame_drop', 'extrinsics', 'mask', 'camera_drop']
+CAMERA_NAMES = ['CAM_FRONT', 'CAM_FRONT_RIGHT', 'CAM_FRONT_LEFT', 
+                'CAM_BACK', 'CAM_BACK_LEFT', 'CAM_BACK_RIGHT']
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='StreamPETR Robustness Test')
+    parser.add_argument('config', help='Path to config file')
+    parser.add_argument('checkpoint', help='Path to checkpoint file')
+    parser.add_argument('--noise-type', type=str, default='clean',
+                        choices=NOISE_TYPES,
+                        help='Type of noise to apply')
+    parser.add_argument('--noise-pkl', type=str, default='',
+                        help='Path to noise annotation pkl file')
+    parser.add_argument('--mask-dir', type=str, default='robust_benchmark/Occlusion_mask',
+                        help='Directory containing mask images')
+    
+    # Frame drop options
+    parser.add_argument('--drop-ratio', type=int, default=30,
+                        choices=[10, 20, 30, 40, 50, 60, 70, 80, 90],
+                        help='Frame drop ratio (%%)')
+    parser.add_argument('--drop-mode', type=str, default='discrete',
+                        choices=['discrete', 'consecutive'],
+                        help='Frame drop mode')
+    
+    # Extrinsics noise options
+    parser.add_argument('--extrinsics-type', type=str, default='single',
+                        choices=['single', 'all'],
+                        help='Extrinsics noise type')
+    
+    # Camera drop options
+    parser.add_argument('--drop-cameras', type=str, nargs='+', default=[],
+                        help='Cameras to drop, e.g., CAM_FRONT CAM_BACK')
+    
+    # Batch test mode
+    parser.add_argument('--batch', action='store_true',
+                        help='Run batch tests for all noise types')
+    parser.add_argument('--output-dir', type=str, default='robust_test/results',
+                        help='Output directory for batch test results')
+    
+    # General options
+    parser.add_argument('--gpu-id', type=int, default=0, help='GPU ID')
+    parser.add_argument('--eval', type=str, nargs='+', default=['bbox'],
+                        help='Evaluation metrics')
+    
+    return parser.parse_args()
+
+
+def modify_config_for_noise(cfg, args):
+    """Modify config to inject noise settings."""
+    cfg = copy.deepcopy(cfg)
+    
+    # Change dataset type to RobustNuScenesDataset
+    for split in ['val', 'test']:
+        if split in cfg.data:
+            cfg.data[split]['type'] = 'RobustNuScenesDataset'
+            
+            # Add noise parameters
+            cfg.data[split]['noise_ann_file'] = args.noise_pkl
+            cfg.data[split]['drop_frames'] = (args.noise_type == 'frame_drop')
+            cfg.data[split]['drop_ratio'] = args.drop_ratio
+            cfg.data[split]['drop_type'] = args.drop_mode
+            cfg.data[split]['extrinsics_noise'] = (args.noise_type == 'extrinsics')
+            cfg.data[split]['extrinsics_noise_type'] = args.extrinsics_type
+            
+            # Modify pipeline for mask and camera drop
+            if args.noise_type == 'mask':
+                cfg.data[split]['pipeline'] = modify_pipeline_for_mask(
+                    cfg.data[split]['pipeline'], args)
+            elif args.noise_type == 'camera_drop':
+                cfg.data[split]['pipeline'] = modify_pipeline_for_camera_drop(
+                    cfg.data[split]['pipeline'], args)
+    
+    return cfg
+
+
+def modify_pipeline_for_mask(pipeline, args):
+    """Replace LoadMultiViewImageFromFiles with LoadMultiViewImageWithMask."""
+    new_pipeline = []
+    for step in pipeline:
+        if step['type'] == 'LoadMultiViewImageFromFiles':
+            new_pipeline.append(dict(
+                type='LoadMultiViewImageWithMask',
+                noise_ann_file=args.noise_pkl,
+                mask_dir=args.mask_dir,
+                to_float32=step.get('to_float32', False),
+            ))
+        elif step['type'] == 'MultiScaleFlipAug3D':
+            # Recursively process nested transforms
+            new_step = copy.deepcopy(step)
+            if 'transforms' in new_step:
+                new_step['transforms'] = modify_pipeline_for_mask(new_step['transforms'], args)
+            new_pipeline.append(new_step)
+        else:
+            new_pipeline.append(step)
+    return new_pipeline
+
+
+def modify_pipeline_for_camera_drop(pipeline, args):
+    """Replace LoadMultiViewImageFromFiles with LoadMultiViewImageWithDrop."""
+    new_pipeline = []
+    for step in pipeline:
+        if step['type'] == 'LoadMultiViewImageFromFiles':
+            new_pipeline.append(dict(
+                type='LoadMultiViewImageWithDrop',
+                drop_cameras=args.drop_cameras,
+                to_float32=step.get('to_float32', False),
+            ))
+        elif step['type'] == 'MultiScaleFlipAug3D':
+            # Recursively process nested transforms
+            new_step = copy.deepcopy(step)
+            if 'transforms' in new_step:
+                new_step['transforms'] = modify_pipeline_for_camera_drop(new_step['transforms'], args)
+            new_pipeline.append(new_step)
+        else:
+            new_pipeline.append(step)
+    return new_pipeline
+
+
+def run_single_test(cfg, checkpoint, args):
+    """Run a single robustness test."""
+    import torch
+    
+    # Set device
+    torch.cuda.set_device(args.gpu_id)
+    
+    # Modify config for noise
+    cfg = modify_config_for_noise(cfg, args)
+    
+    # Build dataset
+    dataset = build_dataset(cfg.data.test)
+    
+    # Build dataloader
+    data_loader = build_dataloader(
+        dataset,
+        samples_per_gpu=1,
+        workers_per_gpu=cfg.data.workers_per_gpu,
+        dist=False,
+        shuffle=False,
+    )
+    
+    # Build model
+    cfg.model.train_cfg = None
+    model = build_model(cfg.model, test_cfg=cfg.get('test_cfg'))
+    load_checkpoint(model, checkpoint, map_location='cpu')
+    model.cuda()
+    model.eval()
+    
+    # Run test
+    outputs = single_gpu_test(model, data_loader)
+    
+    # Evaluate
+    eval_results = dataset.evaluate(outputs, metric=args.eval)
+    
+    return eval_results
+
+
+def run_batch_test(cfg, checkpoint, args):
+    """Run batch tests for multiple noise configurations."""
+    os.makedirs(args.output_dir, exist_ok=True)
+    
+    results = {}
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    
+    # Test configurations
+    test_configs = [
+        # Clean test (0% frame drop)
+        {'noise_type': 'clean', 'name': 'clean_0'},
+        
+        # Frame drop tests: 10%, 20%, 30%, 40%, 50%, 60%, 70%, 80%, 90%
+        *[{'noise_type': 'frame_drop', 'drop_ratio': r, 'drop_mode': 'discrete',
+           'name': f'frame_drop_{r}'} for r in [10, 20, 30, 40, 50, 60, 70, 80, 90]],
+        
+        # Extrinsics noise tests
+        {'noise_type': 'extrinsics', 'extrinsics_type': 'single', 'name': 'extrinsics_single'},
+        {'noise_type': 'extrinsics', 'extrinsics_type': 'all', 'name': 'extrinsics_all'},
+        
+        # Mask occlusion test
+        {'noise_type': 'mask', 'name': 'mask_occlusion'},
+    ]
+    
+    print(f'Running {len(test_configs)} tests...')
+    print('=' * 60)
+    
+    for i, test_cfg in enumerate(test_configs):
+        test_name = test_cfg.pop('name')
+        print(f'[{i+1}/{len(test_configs)}] Running test: {test_name}')
+        
+        # Update args with test config
+        test_args = copy.deepcopy(args)
+        for key, value in test_cfg.items():
+            setattr(test_args, key.replace('-', '_'), value)
+        
+        try:
+            eval_results = run_single_test(cfg, checkpoint, test_args)
+            results[test_name] = eval_results
+            print(f'  Results: {eval_results}')
+        except Exception as e:
+            print(f'  Error: {e}')
+            results[test_name] = {'error': str(e)}
+        
+        print('-' * 60)
+    
+    # Save results
+    result_file = os.path.join(args.output_dir, f'batch_results_{timestamp}.json')
+    with open(result_file, 'w') as f:
+        json.dump(results, f, indent=2)
+    print(f'Results saved to: {result_file}')
+    
+    return results
+
+
+def main():
+    args = parse_args()
+    
+    # Load config
+    cfg = Config.fromfile(args.config)
+    
+    # Set plugin
+    if hasattr(cfg, 'plugin') and cfg.plugin:
+        import importlib
+        if hasattr(cfg, 'plugin_dir'):
+            plugin_dir = cfg.plugin_dir
+            _module_dir = os.path.dirname(plugin_dir)
+            _module_dir = _module_dir.replace('/', '.')
+            if _module_dir:
+                importlib.import_module(_module_dir)
+    
+    print('=' * 60)
+    print('StreamPETR Robustness Test')
+    print('=' * 60)
+    print(f'Config: {args.config}')
+    print(f'Checkpoint: {args.checkpoint}')
+    print(f'Noise Type: {args.noise_type}')
+    
+    if args.batch:
+        print('Mode: Batch Test')
+        results = run_batch_test(cfg, args.checkpoint, args)
+    else:
+        print('Mode: Single Test')
+        if args.noise_type == 'frame_drop':
+            print(f'  Drop Ratio: {args.drop_ratio}%')
+            print(f'  Drop Mode: {args.drop_mode}')
+        elif args.noise_type == 'extrinsics':
+            print(f'  Extrinsics Type: {args.extrinsics_type}')
+        elif args.noise_type == 'camera_drop':
+            print(f'  Drop Cameras: {args.drop_cameras}')
+        
+        results = run_single_test(cfg, args.checkpoint, args)
+        print('=' * 60)
+        print('Results:')
+        for key, value in results.items():
+            print(f'  {key}: {value}')
+    
+    print('=' * 60)
+    print('Test completed!')
+    
+
+if __name__ == '__main__':
+    main()
