@@ -119,6 +119,8 @@ def modify_config_for_noise(cfg, args):
             cfg.data[split]['drop_type'] = args.drop_mode
             cfg.data[split]['extrinsics_noise'] = (args.noise_type == 'extrinsics')
             cfg.data[split]['extrinsics_noise_type'] = args.extrinsics_type
+            # Pass extrinsics level for multi-level noise support
+            cfg.data[split]['extrinsics_level'] = getattr(args, 'current_extrinsics_level', None)
             
             # Modify pipeline for mask and camera drop
             if args.noise_type == 'mask':
@@ -359,32 +361,20 @@ def run_extrinsics_batch_test(cfg, checkpoint, args):
         
         print(f'\n[{i+1}/{len(levels_to_test)}] Testing {test_name}')
         print(f'  Rotation: {rot_deg}°, Translation: {trans_cm}cm ({desc})')
-        
-        # Construct noise PKL path for this level
-        if level == 'L0':
-            # L0 uses clean mode (no extrinsics noise)
-            noise_pkl = args.noise_pkl
-            use_clean = True
-        else:
-            # Other levels use level-specific PKL files or base PKL
-            noise_pkl = os.path.join(args.noise_dir, f'nuscenes_extrinsics_{level}.pkl')
-            use_clean = False
-        
-        print(f'  Noise PKL: {noise_pkl}')
-        
-        # Check if noise PKL exists
-        if not use_clean and not os.path.exists(noise_pkl):
-            print(f'  Warning: Noise PKL not found, using base PKL: {args.noise_pkl}')
-            noise_pkl = args.noise_pkl
+        print(f'  Noise PKL: {args.noise_pkl}')
+        print(f'  Noise Level: {level}')
         
         # Create test args
         test_args = copy.deepcopy(args)
-        if use_clean:
+        if level == 'L0':
             # L0: Use clean mode (no extrinsics noise injection)
             test_args.noise_type = 'clean'
+            test_args.current_extrinsics_level = None
         else:
             test_args.noise_type = 'extrinsics'
-        test_args.noise_pkl = noise_pkl
+            # Set extrinsics level for multi-level noise support
+            test_args.current_extrinsics_level = level
+        # Always use base noise_pkl (it contains all levels)
         
         try:
             eval_results = run_single_test(cfg, checkpoint, test_args)
@@ -482,19 +472,16 @@ def main():
             # Test all levels
             results = run_extrinsics_batch_test(cfg, args.checkpoint, args)
         else:
-            # Test single level - set appropriate noise_pkl
+            # Test single level
             level = args.extrinsics_level
             if level == 'L0':
                 # L0 uses clean mode (no extrinsics noise)
                 args.noise_type = 'clean'
+                args.current_extrinsics_level = None
             else:
-                # Other levels use level-specific PKL
-                level_pkl = os.path.join(args.noise_dir, f'nuscenes_extrinsics_{level}.pkl')
-                if os.path.exists(level_pkl):
-                    args.noise_pkl = level_pkl
-                else:
-                    print(f'Warning: Level PKL not found: {level_pkl}, using base PKL')
+                # L1-L4: Use base PKL with level-specific noise keys
                 args.noise_type = 'extrinsics'
+                args.current_extrinsics_level = level
             
             results = run_single_test(cfg, args.checkpoint, args)
             print('=' * 60)

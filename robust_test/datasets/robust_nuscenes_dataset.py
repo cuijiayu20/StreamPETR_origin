@@ -28,6 +28,7 @@ class RobustNuScenesDataset(CustomNuScenesDataset):
         noise_ann_file (str): Path to noise annotation pkl file.
         extrinsics_noise (bool): Whether to add extrinsics noise.
         extrinsics_noise_type (str): 'single' or 'all' camera noise.
+        extrinsics_level (str): Noise level 'L1', 'L2', 'L3', 'L4' or None for legacy format.
         drop_frames (bool): Whether to enable frame drop.
         drop_ratio (int): Frame drop ratio (10, 20, ..., 90).
         drop_type (str): 'discrete' or 'consecutive' drop mode.
@@ -38,6 +39,7 @@ class RobustNuScenesDataset(CustomNuScenesDataset):
                  noise_ann_file='',
                  extrinsics_noise=False,
                  extrinsics_noise_type='single',
+                 extrinsics_level=None,
                  drop_frames=False,
                  drop_ratio=0,
                  drop_type='discrete',
@@ -48,6 +50,7 @@ class RobustNuScenesDataset(CustomNuScenesDataset):
         # Noise configuration
         self.extrinsics_noise = extrinsics_noise
         self.extrinsics_noise_type = extrinsics_noise_type
+        self.extrinsics_level = extrinsics_level  # L1, L2, L3, L4 or None
         self.drop_frames = drop_frames
         self.drop_ratio = drop_ratio
         self.drop_type = drop_type
@@ -72,7 +75,8 @@ class RobustNuScenesDataset(CustomNuScenesDataset):
         if self.drop_frames:
             print(f'  Frame Drop: ratio={self.drop_ratio}%, mode={self.drop_type}, sensor={self.noise_sensor_type}')
         if self.extrinsics_noise:
-            print(f'  Extrinsics Noise: type={self.extrinsics_noise_type}')
+            level_str = f', level={self.extrinsics_level}' if self.extrinsics_level else ''
+            print(f'  Extrinsics Noise: type={self.extrinsics_noise_type}{level_str}')
         if not self.drop_frames and not self.extrinsics_noise:
             print('  No noise enabled (clean test)')
         print('=' * 50)
@@ -129,7 +133,16 @@ class RobustNuScenesDataset(CustomNuScenesDataset):
                 # Get extrinsics (with optional noise)
                 if self.extrinsics_noise and file_name in self.noise_camera_data:
                     noise_info = self.noise_camera_data[file_name]['noise']['extrinsics_noise']
-                    noise_key = f'{self.extrinsics_noise_type}_noise_sensor2lidar'
+                    
+                    # Build noise key based on level and type
+                    # Format: {level}_{type}_noise_sensor2lidar or {type}_noise_sensor2lidar
+                    if self.extrinsics_level:
+                        # Multi-level format: L1_single, L2_all, etc.
+                        noise_key = f'{self.extrinsics_level}_{self.extrinsics_noise_type}_noise_sensor2lidar'
+                    else:
+                        # Legacy format: single, all
+                        noise_key = f'{self.extrinsics_noise_type}_noise_sensor2lidar'
+                    
                     cam2lidar_r = np.array(noise_info.get(f'{noise_key}_rotation', cam_info['sensor2lidar_rotation']))
                     cam2lidar_t = np.array(noise_info.get(f'{noise_key}_translation', cam_info['sensor2lidar_translation']))
                 else:
