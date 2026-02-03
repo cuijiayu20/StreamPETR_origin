@@ -42,6 +42,16 @@ NOISE_TYPES = ['clean', 'frame_drop', 'extrinsics', 'mask', 'camera_drop']
 CAMERA_NAMES = ['CAM_FRONT', 'CAM_FRONT_RIGHT', 'CAM_FRONT_LEFT', 
                 'CAM_BACK', 'CAM_BACK_LEFT', 'CAM_BACK_RIGHT']
 
+# Extrinsics noise level definitions
+# Level: (rotation_deg, translation_cm, description)
+EXTRINSICS_LEVELS = {
+    'L0': (0.0, 0.0, 'Clean baseline'),
+    'L1': (0.5, 0.3, 'Standard online calibration error'),
+    'L2': (1.0, 0.5, 'Mild drift'),
+    'L3': (2.0, 1.0, 'Moderate drift'),
+    'L4': (5.0, 2.0, 'Severe misalignment'),
+}
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description='StreamPETR Robustness Test')
@@ -75,6 +85,13 @@ def parse_args():
     # Batch test mode
     parser.add_argument('--batch', action='store_true',
                         help='Run batch tests for all noise types')
+    parser.add_argument('--batch-extrinsics', action='store_true',
+                        help='Run batch tests for all extrinsics noise levels (L0-L4)')
+    parser.add_argument('--extrinsics-level', type=str, default=None,
+                        choices=['L0', 'L1', 'L2', 'L3', 'L4', 'all'],
+                        help='Extrinsics noise level (L0-L4 or all)')
+    parser.add_argument('--noise-dir', type=str, default='data/nuscenes/extrinsics_levels',
+                        help='Directory containing level-specific noise PKL files')
     parser.add_argument('--output-dir', type=str, default='robust_test/results',
                         help='Output directory for batch test results')
     
@@ -304,6 +321,127 @@ def run_batch_test(cfg, checkpoint, args):
     return results
 
 
+def run_extrinsics_batch_test(cfg, checkpoint, args):
+    """Run batch tests for all extrinsics noise levels (L0-L4).
+    
+    Supports two modes:
+    - single: Each camera gets independent noise
+    - all: All cameras share the same noise per frame
+    """
+    os.makedirs(args.output_dir, exist_ok=True)
+    
+    results = {}
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    
+    # Determine which levels to test
+    if args.extrinsics_level == 'all' or args.extrinsics_level is None:
+        levels_to_test = ['L0', 'L1', 'L2', 'L3', 'L4']
+    else:
+        levels_to_test = [args.extrinsics_level]
+    
+    print(f'Extrinsics Type: {args.extrinsics_type}')
+    print(f'Levels to test: {levels_to_test}')
+    print(f'Noise Dir: {args.noise_dir}')
+    print('=' * 60)
+    
+    # Print level definitions
+    print('\nNoise Level Definitions:')
+    print(f'{"Level":<6} {"Rot(°)":<10} {"Trans(cm)":<12} {"Description"}')
+    print('-' * 50)
+    for level in levels_to_test:
+        rot, trans, desc = EXTRINSICS_LEVELS[level]
+        print(f'{level:<6} {rot:<10} {trans:<12} {desc}')
+    print('=' * 60)
+    
+    for i, level in enumerate(levels_to_test):
+        rot_deg, trans_cm, desc = EXTRINSICS_LEVELS[level]
+        test_name = f'extrinsics_{args.extrinsics_type}_{level}'
+        
+        print(f'\n[{i+1}/{len(levels_to_test)}] Testing {test_name}')
+        print(f'  Rotation: {rot_deg}°, Translation: {trans_cm}cm ({desc})')
+        
+        # Construct noise PKL path for this level
+        if level == 'L0':
+            # L0 uses clean mode (no extrinsics noise)
+            noise_pkl = args.noise_pkl
+            use_clean = True
+        else:
+            # Other levels use level-specific PKL files or base PKL
+            noise_pkl = os.path.join(args.noise_dir, f'nuscenes_extrinsics_{level}.pkl')
+            use_clean = False
+        
+        print(f'  Noise PKL: {noise_pkl}')
+        
+        # Check if noise PKL exists
+        if not use_clean and not os.path.exists(noise_pkl):
+            print(f'  Warning: Noise PKL not found, using base PKL: {args.noise_pkl}')
+            noise_pkl = args.noise_pkl
+        
+        # Create test args
+        test_args = copy.deepcopy(args)
+        if use_clean:
+            # L0: Use clean mode (no extrinsics noise injection)
+            test_args.noise_type = 'clean'
+        else:
+            test_args.noise_type = 'extrinsics'
+        test_args.noise_pkl = noise_pkl
+        
+        try:
+            eval_results = run_single_test(cfg, checkpoint, test_args)
+            results[test_name] = {
+                'level': level,
+                'rotation_deg': rot_deg,
+                'translation_cm': trans_cm,
+                'extrinsics_type': args.extrinsics_type,
+                'metrics': eval_results
+            }
+            
+            # Print key metrics
+            if 'pts_bbox_NuScenes/NDS' in eval_results:
+                nds = eval_results['pts_bbox_NuScenes/NDS']
+                mAP = eval_results.get('pts_bbox_NuScenes/mAP', 0)
+                print(f'  Results: NDS={nds:.4f}, mAP={mAP:.4f}')
+            else:
+                print(f'  Results: {eval_results}')
+                
+        except Exception as e:
+            import traceback
+            print(f'  Error: {e}')
+            traceback.print_exc()
+            results[test_name] = {'error': str(e)}
+        
+        print('-' * 60)
+    
+    # Save results
+    result_file = os.path.join(
+        args.output_dir, 
+        f'extrinsics_{args.extrinsics_type}_results_{timestamp}.json'
+    )
+    with open(result_file, 'w') as f:
+        json.dump(results, f, indent=2)
+    print(f'\nResults saved to: {result_file}')
+    
+    # Print summary table
+    print('\n' + '=' * 60)
+    print('Summary: Extrinsics Noise Level Test Results')
+    print('=' * 60)
+    print(f'{"Level":<6} {"Rot(°)":<8} {"Trans(cm)":<10} {"NDS":<10} {"mAP":<10}')
+    print('-' * 50)
+    for level in levels_to_test:
+        test_name = f'extrinsics_{args.extrinsics_type}_{level}'
+        if test_name in results and 'metrics' in results[test_name]:
+            metrics = results[test_name]['metrics']
+            nds = metrics.get('pts_bbox_NuScenes/NDS', 0)
+            mAP = metrics.get('pts_bbox_NuScenes/mAP', 0)
+            rot = results[test_name]['rotation_deg']
+            trans = results[test_name]['translation_cm']
+            print(f'{level:<6} {rot:<8} {trans:<10} {nds:<10.4f} {mAP:<10.4f}')
+        else:
+            print(f'{level:<6} {"Error":<28}')
+    print('=' * 60)
+    
+    return results
+
 def main():
     args = parse_args()
     
@@ -325,13 +463,47 @@ def main():
     print('=' * 60)
     print(f'Config: {args.config}')
     print(f'Checkpoint: {args.checkpoint}')
-    print(f'Noise Type: {args.noise_type}')
     
-    if args.batch:
+    if args.batch_extrinsics:
+        # Batch extrinsics noise level test
+        print('Mode: Batch Extrinsics Noise Level Test')
+        results = run_extrinsics_batch_test(cfg, args.checkpoint, args)
+    elif args.batch:
         print('Mode: Batch Test')
+        print(f'Noise Type: {args.noise_type}')
         results = run_batch_test(cfg, args.checkpoint, args)
+    elif args.extrinsics_level is not None:
+        # Single extrinsics level test
+        print('Mode: Single Extrinsics Level Test')
+        print(f'  Extrinsics Level: {args.extrinsics_level}')
+        print(f'  Extrinsics Type: {args.extrinsics_type}')
+        
+        if args.extrinsics_level == 'all':
+            # Test all levels
+            results = run_extrinsics_batch_test(cfg, args.checkpoint, args)
+        else:
+            # Test single level - set appropriate noise_pkl
+            level = args.extrinsics_level
+            if level == 'L0':
+                # L0 uses clean mode (no extrinsics noise)
+                args.noise_type = 'clean'
+            else:
+                # Other levels use level-specific PKL
+                level_pkl = os.path.join(args.noise_dir, f'nuscenes_extrinsics_{level}.pkl')
+                if os.path.exists(level_pkl):
+                    args.noise_pkl = level_pkl
+                else:
+                    print(f'Warning: Level PKL not found: {level_pkl}, using base PKL')
+                args.noise_type = 'extrinsics'
+            
+            results = run_single_test(cfg, args.checkpoint, args)
+            print('=' * 60)
+            print('Results:')
+            for key, value in results.items():
+                print(f'  {key}: {value}')
     else:
         print('Mode: Single Test')
+        print(f'Noise Type: {args.noise_type}')
         if args.noise_type == 'frame_drop':
             print(f'  Drop Ratio: {args.drop_ratio}%')
             print(f'  Drop Mode: {args.drop_mode}')
@@ -345,6 +517,7 @@ def main():
         print('Results:')
         for key, value in results.items():
             print(f'  {key}: {value}')
+
     
     print('=' * 60)
     print('Test completed!')
