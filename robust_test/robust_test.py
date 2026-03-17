@@ -53,10 +53,10 @@ EXTRINSICS_LEVELS = {
 # Mask occlusion severity levels
 # Level: (alpha_exp, description)
 MASK_SEVERITY_LEVELS = {
-    'S1': (5.0, 'Light occlusion (water drop/light dirt)'),
-    'S2': (3.0, 'Moderate occlusion (original default)'),
-    'S3': (1.5, 'Severe occlusion (large area)'),
-    'S4': (1.0, 'Extreme occlusion (nearly completely covered)'),
+    'S1': (1.0, 'Light occlusion (water drop/light dirt)'),
+    'S2': (2.0, 'Moderate occlusion'),
+    'S3': (3.0, 'Severe occlusion (original default)'),
+    'S4': (5.0, 'Extreme occlusion (nearly completely covered)'),
 }
 
 
