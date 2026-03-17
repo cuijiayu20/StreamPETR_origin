@@ -25,8 +25,10 @@ class LoadMultiViewImageWithMask:
     def __init__(self, 
                  noise_ann_file='',
                  mask_dir='',
+                 alpha_exp=3.0,
                  to_float32=False, 
                  color_type='unchanged'):
+        self.alpha_exp = alpha_exp
         self.to_float32 = to_float32
         self.color_type = color_type
         self.mask_dir = mask_dir
@@ -56,7 +58,7 @@ class LoadMultiViewImageWithMask:
         mask = np.rot90(mask.copy())  # Copy to avoid modifying original
         mask = mmcv.imresize(mask, (w, h), return_scale=False)
         alpha = mask / 255.0
-        alpha = np.power(alpha, 3)
+        alpha = np.power(alpha, self.alpha_exp)
         img_with_mask = alpha * img + (1 - alpha) * mask
         return img_with_mask.astype(np.uint8)
     

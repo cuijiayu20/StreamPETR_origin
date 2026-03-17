@@ -42,14 +42,21 @@ NOISE_TYPES = ['clean', 'frame_drop', 'extrinsics', 'mask', 'camera_drop']
 CAMERA_NAMES = ['CAM_FRONT', 'CAM_FRONT_RIGHT', 'CAM_FRONT_LEFT', 
                 'CAM_BACK', 'CAM_BACK_LEFT', 'CAM_BACK_RIGHT']
 
-# Extrinsics noise level definitions
-# Level: (rotation_deg, translation_cm, description)
 EXTRINSICS_LEVELS = {
     'L0': (0.0, 0.0, 'Clean baseline'),
     'L1': (0.5, 0.3, 'Standard online calibration error'),
     'L2': (1.0, 0.5, 'Mild drift'),
     'L3': (2.0, 1.0, 'Moderate drift'),
     'L4': (5.0, 2.0, 'Severe misalignment'),
+}
+
+# Mask occlusion severity levels
+# Level: (alpha_exp, description)
+MASK_SEVERITY_LEVELS = {
+    'S1': (5.0, 'Light occlusion (water drop/light dirt)'),
+    'S2': (3.0, 'Moderate occlusion (original default)'),
+    'S3': (1.5, 'Severe occlusion (large area)'),
+    'S4': (1.0, 'Extreme occlusion (nearly completely covered)'),
 }
 
 
@@ -64,6 +71,8 @@ def parse_args():
                         help='Path to noise annotation pkl file')
     parser.add_argument('--mask-dir', type=str, default='robust_benchmark/Occlusion_mask',
                         help='Directory containing mask images')
+    parser.add_argument('--alpha-exp', type=float, default=3.0,
+                        help='Alpha exponent for mask occlusion. Higher = less opaque (default: 3.0)')
     
     # Frame drop options
     parser.add_argument('--drop-ratio', type=int, default=30,
@@ -87,6 +96,8 @@ def parse_args():
                         help='Run batch tests for all noise types')
     parser.add_argument('--batch-extrinsics', action='store_true',
                         help='Run batch tests for all extrinsics noise levels (L0-L4)')
+    parser.add_argument('--batch-mask-occlusion', action='store_true',
+                        help='Run batch tests for all mask occlusion severity levels (S1-S4)')
     parser.add_argument('--extrinsics-level', type=str, default=None,
                         choices=['L0', 'L1', 'L2', 'L3', 'L4', 'all'],
                         help='Extrinsics noise level (L0-L4 or all)')
@@ -142,6 +153,7 @@ def modify_pipeline_for_mask(pipeline, args):
                 type='LoadMultiViewImageWithMask',
                 noise_ann_file=args.noise_pkl,
                 mask_dir=args.mask_dir,
+                alpha_exp=getattr(args, 'alpha_exp', 3.0),
                 to_float32=step.get('to_float32', False),
             ))
         elif step['type'] == 'MultiScaleFlipAug3D':
@@ -432,6 +444,92 @@ def run_extrinsics_batch_test(cfg, checkpoint, args):
     
     return results
 
+
+def run_mask_batch_test(cfg, checkpoint, args):
+    """Run batch tests for all mask occlusion severity levels (S1-S4)."""
+    os.makedirs(args.output_dir, exist_ok=True)
+    
+    results = {}
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    
+    levels_to_test = ['S1', 'S2', 'S3', 'S4']
+    
+    print('=' * 60)
+    print('\nMask Occlusion Severity Level Definitions:')
+    print(f'{"Level":<6} {"Alpha Exp":<10} {"Description"}')
+    print('-' * 50)
+    for level in levels_to_test:
+        alpha_exp, desc = MASK_SEVERITY_LEVELS[level]
+        print(f'{level:<6} {alpha_exp:<10.1f} {desc}')
+    print('=' * 60)
+    
+    for i, level in enumerate(levels_to_test):
+        alpha_exp, desc = MASK_SEVERITY_LEVELS[level]
+        test_name = f'mask_occlusion_{level}'
+        
+        print(f'\n[{i+1}/{len(levels_to_test)}] Testing {test_name}')
+        print(f'  Alpha Exp: {alpha_exp} ({desc})')
+        print(f'  Noise PKL: {args.noise_pkl}')
+        print(f'  Noise Level: {level}')
+        
+        # Create test args
+        test_args = copy.deepcopy(args)
+        test_args.noise_type = 'mask'
+        test_args.alpha_exp = alpha_exp
+        
+        try:
+            eval_results = run_single_test(cfg, checkpoint, test_args)
+            results[test_name] = {
+                'level': level,
+                'alpha_exp': alpha_exp,
+                'metrics': eval_results
+            }
+            
+            # Print key metrics
+            if 'pts_bbox_NuScenes/NDS' in eval_results:
+                nds = eval_results['pts_bbox_NuScenes/NDS']
+                mAP = eval_results.get('pts_bbox_NuScenes/mAP', 0)
+                print(f'  Results: NDS={nds:.4f}, mAP={mAP:.4f}')
+            else:
+                print(f'  Results: {eval_results}')
+                
+        except Exception as e:
+            import traceback
+            print(f'  Error: {e}')
+            traceback.print_exc()
+            results[test_name] = {'error': str(e)}
+        
+        print('-' * 60)
+    
+    # Save results
+    result_file = os.path.join(
+        args.output_dir, 
+        f'mask_batch_results_{timestamp}.json'
+    )
+    with open(result_file, 'w') as f:
+        json.dump(results, f, indent=2)
+    print(f'\nResults saved to: {result_file}')
+    
+    # Print summary table
+    print('\n' + '=' * 60)
+    print('Summary: Mask Occlusion Severity Level Test Results')
+    print('=' * 60)
+    print(f'{"Level":<6} {"Alpha Exp":<10} {"NDS":<10} {"mAP":<10}')
+    print('-' * 50)
+    for level in levels_to_test:
+        test_name = f'mask_occlusion_{level}'
+        if test_name in results and 'metrics' in results[test_name]:
+            metrics = results[test_name]['metrics']
+            nds = metrics.get('pts_bbox_NuScenes/NDS', 0)
+            mAP = metrics.get('pts_bbox_NuScenes/mAP', 0)
+            alpha_exp = results[test_name]['alpha_exp']
+            print(f'{level:<6} {alpha_exp:<10.1f} {nds:<10.4f} {mAP:<10.4f}')
+        else:
+            print(f'{level:<6} {"Error":<32}')
+    print('=' * 60)
+    
+    return results
+
 def main():
     args = parse_args()
     
@@ -458,6 +556,10 @@ def main():
         # Batch extrinsics noise level test
         print('Mode: Batch Extrinsics Noise Level Test')
         results = run_extrinsics_batch_test(cfg, args.checkpoint, args)
+    elif args.batch_mask_occlusion:
+        # Batch mask occlusion severity level test
+        print('Mode: Batch Mask Occlusion Severity Level Test')
+        results = run_mask_batch_test(cfg, args.checkpoint, args)
     elif args.batch:
         print('Mode: Batch Test')
         print(f'Noise Type: {args.noise_type}')
@@ -496,6 +598,8 @@ def main():
             print(f'  Drop Mode: {args.drop_mode}')
         elif args.noise_type == 'extrinsics':
             print(f'  Extrinsics Type: {args.extrinsics_type}')
+        elif args.noise_type == 'mask':
+            print(f'  Alpha Exp: {args.alpha_exp}')
         elif args.noise_type == 'camera_drop':
             print(f'  Drop Cameras: {args.drop_cameras}')
         
