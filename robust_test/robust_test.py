@@ -105,6 +105,8 @@ def parse_args():
                         help='Directory containing level-specific noise PKL files')
     parser.add_argument('--output-dir', type=str, default='robust_test/results',
                         help='Output directory for batch test results')
+    parser.add_argument('--res-dir', type=str, default=None,
+                        help='Output directory for nuscenes results.json')
     
     # General options
     parser.add_argument('--gpu-id', type=int, default=0, help='GPU ID')
@@ -243,7 +245,12 @@ def run_single_test(cfg, checkpoint, args):
     outputs = custom_single_gpu_test(model, data_loader)
     
     # Evaluate
-    eval_results = dataset.evaluate(outputs, metric=args.eval)
+    kwargs = {}
+    if getattr(args, 'res_dir', None) is not None:
+        os.makedirs(args.res_dir, exist_ok=True)
+        kwargs['res_dir'] = args.res_dir
+        kwargs['jsonfile_prefix'] = os.path.join(args.res_dir, 'results_nusc')
+    eval_results = dataset.evaluate(outputs, metric=args.eval, **kwargs)
     
     return eval_results
 
