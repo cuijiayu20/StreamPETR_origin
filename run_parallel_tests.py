@@ -13,23 +13,23 @@ def main():
     tasks = [
         {
             "name": "Clean (正常)",
-            "args": ["--noise-type", "clean", "--gpu-id", "0", "--res-dir", "robust_test/results/clean"],
-            "log": "robust_test/results/log_clean.txt"
+            "args": ["--noise-type", "clean", "--gpu-id", "0", "--res-dir", "our_clean"],
+            "log": "our_clean.log"
         },
         {
             "name": "Frame Drop 50% (50%丢帧)",
-            "args": ["--noise-type", "frame_drop", "--drop-ratio", "50", "--drop-mode", "discrete", "--gpu-id", "1", "--res-dir", "robust_test/results/frame_drop_50"],
-            "log": "robust_test/results/log_frame_drop.txt"
+            "args": ["--noise-type", "frame_drop", "--drop-ratio", "50", "--drop-mode", "discrete", "--gpu-id", "1", "--res-dir", "our_framedrop_50"],
+            "log": "our_framedrop_50.log"
         },
         {
             "name": "Extrinsics L2 (外参L2)",
-            "args": ["--noise-type", "extrinsics", "--extrinsics-level", "L2", "--gpu-id", "2", "--res-dir", "robust_test/results/extrinsics_L2"],
-            "log": "robust_test/results/log_extrinsics.txt"
+            "args": ["--noise-type", "extrinsics", "--extrinsics-level", "L2", "--gpu-id", "2", "--res-dir", "our_extrinsics_L2"],
+            "log": "our_extrinsics_L2.log"
         },
         {
             "name": "Mask S2 (遮挡S2)",
-            "args": ["--noise-type", "mask", "--alpha-exp", "2.0", "--gpu-id", "3", "--res-dir", "robust_test/results/mask_S2"],
-            "log": "robust_test/results/log_mask.txt"
+            "args": ["--noise-type", "mask", "--alpha-exp", "2.0", "--gpu-id", "3", "--res-dir", "our_occlusion_S2"],
+            "log": "our_occlusion_S2.log"
         }
     ]
     
