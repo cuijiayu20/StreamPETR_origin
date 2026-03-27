@@ -2,111 +2,104 @@ import os
 import json
 import argparse
 import mmcv
-import numpy as np
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Print visualization text for 4 robustness conditions')
-    parser.add_argument('--token', type=str, default=None, help='Sample token to print. If None, picks the first one.')
-    parser.add_argument('--info-pkl', type=str, default='data/nuscenes/nuscenes_infos_val_with_noise.pkl', help='Path to GT pkl info')
-    parser.add_argument('--clean-json', type=str, default='robust_test/results/clean/pts_bbox/results_nusc.json')
-    parser.add_argument('--frame-drop-json', type=str, default='robust_test/results/frame_drop_50/pts_bbox/results_nusc.json')
-    parser.add_argument('--extrinsic-json', type=str, default='robust_test/results/extrinsics_L2/pts_bbox/results_nusc.json')
-    parser.add_argument('--mask-json', type=str, default='robust_test/results/mask_S2/pts_bbox/results_nusc.json')
-    parser.add_argument('--score-thr', type=float, default=0.25, help='Score threshold for printing predictions')
+    parser = argparse.ArgumentParser(description='Export visualization data to JSON')
+    parser.add_argument('--tokens', type=str, nargs='*', default=None, help='List of sample tokens to export')
+    parser.add_argument('--info-pkl', type=str, default='data/nuscenes/nuscenes_infos_val_with_noise.pkl')
+    parser.add_argument('--clean-json', type=str, default='our_clean/results_nusc.json')
+    parser.add_argument('--frame-drop-json', type=str, default='our_framedrop_50/results_nusc.json')
+    parser.add_argument('--extrinsic-json', type=str, default='our_extrinsics_L2/results_nusc.json')
+    parser.add_argument('--mask-json', type=str, default='our_occlusion_S2/results_nusc.json')
+    parser.add_argument('--score-thr', type=float, default=0.25)
+    parser.add_argument('--out-json', type=str, default='compare_results.json')
     return parser.parse_args()
 
 def load_json(path):
     if not os.path.exists(path):
-        # Fallback in case pts_bbox suffix is different
-        fallback = path.replace('/pts_bbox/results_nusc.json', '.json')
-        if os.path.exists(fallback):
-            path = fallback
-        else:
-            return None
+        return None
     with open(path, 'r') as f:
         return json.load(f)
 
-def format_box(box):
-    return f"[{box['translation'][0]:.2f}, {box['translation'][1]:.2f}, {box['translation'][2]:.2f}, w:{box['size'][0]:.2f}, l:{box['size'][1]:.2f}, h:{box['size'][2]:.2f}, score:{box['detection_score']:>4.2f}]"
+def format_box_dict(box):
+    return {
+        "translation": [float(x) for x in box['translation']],
+        "size": [float(x) for x in box['size']],
+        "rotation": [float(x) for x in box['rotation']],
+        "velocity": [float(x) for x in box.get('velocity', [0.0, 0.0])],
+        "name": box['detection_name'],
+        "score": float(box.get('detection_score', 1.0))
+    }
+
+def get_gt_boxes_for_token(info_list, token):
+    for info in info_list:
+        if info.get('token') == token:
+            gt_boxes = info.get('gt_boxes', [])
+            gt_names = info.get('gt_names', [])
+            gt_list = []
+            for box, name in zip(gt_boxes, gt_names):
+                gt_list.append({
+                    "translation": [float(x) for x in box[0:3]],
+                    "size": [float(x) for x in box[3:6]],
+                    "rotation": [float(x) for x in box[6:7]] if len(box)>6 else [0.0],
+                    "velocity": [float(x) for x in box[7:9]] if len(box)>8 else [0.0, 0.0],
+                    "name": name,
+                    "score": 1.0
+                })
+            return gt_list
+    return []
 
 def main():
     args = parse_args()
     
-    # Load predictions
     results = {
-        'Clean (正常)': load_json(args.clean_json),
-        'Frame Drop 50% (50%丢帧)': load_json(args.frame_drop_json),
-        'Extrinsics L2 (外参L2)': load_json(args.extrinsic_json),
-        'Mask S2 (遮挡S2)': load_json(args.mask_json)
+        'clean': load_json(args.clean_json),
+        'frame_drop_50': load_json(args.frame_drop_json),
+        'extrinsics_L2': load_json(args.extrinsic_json),
+        'mask_S2': load_json(args.mask_json)
     }
     
-    # Verify loaded predictions
-    for name, data in results.items():
-        if data is None:
-            print(f"Warning: Could not load data for {name}")
-    
-    # Determine token
+    info_list = []
+    if os.path.exists(args.info_pkl):
+        infos = mmcv.load(args.info_pkl)
+        info_list = infos.get('infos', infos)
+    else:
+        print(f"Warning: GT pkl not found at {args.info_pkl}.")
+
     valid_data = [d for d in results.values() if d is not None]
     if not valid_data:
-        print("Error: No prediction data loaded. Are the paths correct?")
+        print("Error: No JSON data loaded. Please check folder paths.")
         return
+
+    tokens_to_process = args.tokens
+    if not tokens_to_process:
+        # Default top 10 tokens from the first valid JSON
+        all_tokens = list(valid_data[0]['results'].keys())
+        tokens_to_process = all_tokens[:10]
+        print(f"No explicit tokens given. Exporting {len(tokens_to_process)} tokens to JSON.")
         
-    sample_token = args.token
-    if sample_token is None:
-        # Pick the first token from available results
-        sample_token = list(valid_data[0]['results'].keys())[0]
-        print(f"No token specified. Using token: {sample_token}")
+    output_data = {}
     
-    print("="*80)
-    print(f"Results for Sample Token: {sample_token}")
-    print("="*80)
-    
-    # Load GT
-    if os.path.exists(args.info_pkl):
-        print("Ground Truth (真实数据):")
-        infos = mmcv.load(args.info_pkl)
-        info_list = infos['infos'] if 'infos' in infos else infos
+    for token in tokens_to_process:
+        token_data = {}
+        token_data['gt'] = get_gt_boxes_for_token(info_list, token)
         
-        target_info = None
-        for info in info_list:
-            if info.get('token') == sample_token:
-                target_info = info
-                break
+        for name, data in results.items():
+            if data is None:
+                token_data[name] = []
+                continue
                 
-        if target_info and 'gt_boxes' in target_info:
-            gt_boxes = target_info['gt_boxes']
-            gt_names = target_info['gt_names']
-            count = 0
-            for box, name in zip(gt_boxes, gt_names):
-                # Using a very basic format for GT, adapt if structure differs
-                # x, y, z, w, l, h, yaw, v_x, v_y
-                print(f"  - {name:<10}: [{box[0]:.2f}, {box[1]:.2f}, {box[2]:.2f}, w:{box[3]:.2f}, l:{box[4]:.2f}, h:{box[5]:.2f}]")
-                count += 1
-            print(f"  Total GT objects: {count}")
-        else:
-            print("  [No GT found for this token in the provided info pkl]")
-    else:
-        print(f"Ground Truth (真实数据): [Could not load info pkl from {args.info_pkl}]")
-        
-    print("-"*80)
-        
-    for name, data in results.items():
-        print(f"{name}:")
-        if data is None:
-            print("  [File Missing or Failed to Load]")
-            continue
+            preds = data['results'].get(token, [])
+            preds = [p for p in preds if p.get('detection_score', 0) >= args.score_thr]
+            token_data[name] = [format_box_dict(p) for p in preds]
             
-        preds = data['results'].get(sample_token, [])
-        # Filter by threshold
-        preds = [p for p in preds if p['detection_score'] >= args.score_thr]
+        output_data[token] = token_data
         
-        if not preds:
-            print("  [No predictions above score threshold]")
-        else:
-            for p in preds:
-                print(f"  - {p['detection_name']:<10}: {format_box(p)}")
-            print(f"  Total predicted above {args.score_thr} threshold: {len(preds)}")
-        print("-"*80)
+    os.makedirs(os.path.dirname(os.path.abspath(args.out_json)), exist_ok=True)
+    with open(args.out_json, 'w') as f:
+        json.dump(output_data, f, indent=4)
+        
+    print(f"Saved JSON comparison results to {args.out_json}")
 
 if __name__ == '__main__':
     main()
