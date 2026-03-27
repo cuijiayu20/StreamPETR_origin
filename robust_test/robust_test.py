@@ -248,7 +248,6 @@ def run_single_test(cfg, checkpoint, args):
     kwargs = {}
     if getattr(args, 'res_dir', None) is not None:
         os.makedirs(args.res_dir, exist_ok=True)
-        kwargs['res_dir'] = args.res_dir
         kwargs['jsonfile_prefix'] = os.path.join(args.res_dir, 'results_nusc')
     eval_results = dataset.evaluate(outputs, metric=args.eval, **kwargs)
     
