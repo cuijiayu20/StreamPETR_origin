@@ -5,7 +5,7 @@ import sys
 def main():
     base_cmd = [
         sys.executable, "robust_test/robust_test.py",
-        "projects/configs/StreamPETR/stream_petr_r50_flash_704_bs2_seq_428q_nui_60e_mini.py",
+        "projects/configs/StreamPETR/stream_petr_r50_flash_704_bs2_seq_428q_nui_60e.py",
         "data/ckpts/stream_petr_r50_flash_704_bs2_seq_428q_nui_60e.pth",
         "--noise-pkl", "data/nuscenes/nuscenes_infos_val_with_noise.pkl"
     ]
